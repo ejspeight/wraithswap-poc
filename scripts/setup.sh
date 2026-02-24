@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${ROOT_DIR}/bin"
-VERSION="3.6.7"
+VERSION=$(curl -fsSL https://api.github.com/repos/eigenwallet/core/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+if [[ -z "${VERSION}" ]]; then
+  echo "Failed to resolve latest release version from GitHub"
+  exit 1
+fi
 BASE_URL="https://github.com/eigenwallet/core/releases/download/${VERSION}"
 
 mkdir -p "${BIN_DIR}"

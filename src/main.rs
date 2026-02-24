@@ -29,14 +29,27 @@ struct SwapView {
 async fn main() -> Result<()> {
     let db_path = resolve_asb_db_path();
     let mut previous_states: HashMap<String, String> = HashMap::new();
+    let mut pool: Option<SqlitePool> = None;
 
     loop {
         clear_screen();
         render_header(&db_path);
 
         match db_path {
-            Some(ref path) if path.exists() => match open_read_only_pool(path).await {
-                Ok(pool) => match fetch_swaps(&pool).await {
+            Some(ref path) if path.exists() => {
+                // Open pool once; reuse across iterations
+                if pool.is_none() {
+                    match open_read_only_pool(path).await {
+                        Ok(p) => pool = Some(p),
+                        Err(err) => {
+                            render_error(&format!("Failed to connect (read-only): {err}"));
+                            sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
+                }
+
+                match fetch_swaps(pool.as_ref().unwrap()).await {
                     Ok(rows) => {
                         if rows.is_empty() {
                             println!("{}", "No swaps yet.".yellow());
@@ -49,12 +62,11 @@ async fn main() -> Result<()> {
                     }
                     Err(err) => {
                         render_error(&format!("Failed to query swaps: {err}"));
+                        // Drop the pool so we reconnect next iteration
+                        pool = None;
                     }
-                },
-                Err(err) => {
-                    render_error(&format!("Failed to connect (read-only): {err}"));
                 }
-            },
+            }
             Some(ref path) => {
                 render_error(&format!("Database not found yet: {}", path.display()));
                 println!("{}", "Start ASB first: ./bin/asb --testnet start".dimmed());
@@ -115,7 +127,7 @@ fn build_views(rows: Vec<SwapRow>, prev: &mut HashMap<String, String>) -> Vec<Sw
     rows.into_iter()
         .map(|row| {
             let prev_state = prev.get(&row.swap_id).cloned();
-            let changed = prev_state.as_deref() != Some(row.state.as_str());
+            let changed = prev_state.is_some() && prev_state.as_deref() != Some(row.state.as_str());
             prev.insert(row.swap_id.clone(), row.state.clone());
 
             SwapView {
@@ -142,7 +154,16 @@ fn render_header(db_path: &Option<PathBuf>) {
 
     let db_display = db_path
         .as_ref()
-        .map(|p| p.display().to_string())
+        .map(|p| {
+            let s = p.display().to_string();
+            if let Some(home) = home_dir() {
+                let home_str = home.display().to_string();
+                if s.starts_with(&home_str) {
+                    return format!("~{}", &s[home_str.len()..]);
+                }
+            }
+            s
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     let last_updated = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -182,6 +203,7 @@ fn format_state(state: &str, changed: bool) -> String {
         "EncSigSent" => state.yellow(),
         "BtcRedeemed" => format!("{state} ✓").green(),
         "XmrRefunded" => state.magenta(),
+        "BtcCancelled" => state.magenta(),
         "BtcPunished" => state.red(),
         "SafelyAborted" => state.dimmed(),
         _ => state.normal(),
